@@ -3,6 +3,7 @@ import operator
 import os
 import time
 from typing import Dict, TypedDict, Annotated
+from sqlalchemy import create_engine
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -21,17 +22,22 @@ from langchain.output_parsers import PydanticOutputParser
 from langchain_anthropic import ChatAnthropic
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, END
+from langchain_community.utilities import SQLDatabase
 from langchain_community.utilities.tavily_search import TavilySearchAPIWrapper
 
 load_dotenv()
 
 console = Console()
 
+# Database
+engine = create_engine("sqlite:///moga_memory.db", isolation_level="AUTOCOMMIT")
+db = SQLDatabase(engine)
+
 welcome_message = Group(
     Text("Welcome to MoGA (Mixture-of-Graph-Agents)!", style="bold cyan"),
     Text("\nThis script uses the following LLMs as proposer models, then passes the results to the aggregate model for the final response:"),
     Text("- llama3-8b-8192", style="green"),
-    Text("- gemma-7b-it", style="green"),
+    Text("- gemma2-9b-it", style="green"),
     Text("- mixtral-8x7b-32768", style="green"),
     Text("\nThe aggregator and reflector models use ", end=""),
     Text("llama3-70b-8192", style="magenta"),
@@ -75,24 +81,20 @@ class State(TypedDict):
     iteration: int
     max_iterations: int
     reflection: str
+    context: dict
 
 # Initialize models and search tool
 proposer_models = [
     ChatGroq(temperature=0, model_name="llama3-8b-8192",),
-    ChatGroq(temperature=0, model_name="gemma-7b-it",),
+    ChatGroq(temperature=0, model_name="gemma2-9b-it",),
     ChatGroq(temperature=0, model_name="mixtral-8x7b-32768"),
 ]
 
-#aggregator_model = ChatOpenAI(
-#        openai_api_base="https://api.groq.com/openai/v1",
-#        openai_api_key=os.getenv("GROQ_API_KEY"),
-#        model_name="llama3-70b-8192"
-#    )
-
-aggregator_model = ChatAnthropic(
-    model="claude-3-5-sonnet-20240620",
-    temperature=0,
-)
+aggregator_model = ChatOpenAI(
+        openai_api_base="https://api.groq.com/openai/v1",
+        openai_api_key=os.getenv("GROQ_API_KEY"),
+        model_name="llama3-70b-8192"
+    )
 
 reflector_model = ChatOpenAI(
         openai_api_base="https://api.groq.com/openai/v1",
@@ -150,10 +152,10 @@ def aggregator(state: State) -> State:
         ("system", "You are an expert aggregator. Your task is to synthesize multiple responses into a single, high-quality answer."),
         ("human", '''
         You have been provided with a set of responses from various open-source models to the user query '{input}'.
-        Your task is to synthesize these responses into a single, high-quality response.
+        Your task is to break down these responses and disect and anazlye the data into a single,comprehensive professional-quality response.
         It is crucial to critically evaluate the information provided in these responses, 
         recognizing that some of it may be biased or incorrect. 
-        Your response should not simply replicate the given answers but should offer a refined, accurate, and comprehensive reply to the user query. Ensure your response is well-structured, coherent, and adheres to the highest standards of accuracy and reliability.
+        Your response should never simply replicate the given answers but should offer a refined, reprocessed, of the highest quality with precise accuracy and reliabilityfor one final comprehensive response to the user query. Ensure your response is well-structured, coherent, and adheres to the highest standards of accuracy and reliability.
  
         Responses from models:
         {responses}
@@ -181,7 +183,6 @@ def aggregator(state: State) -> State:
     
     state["responses"] = response.content
     return state
-
 
 class GradeGeneration(BaseModel):
     """Binary score for relevance check on retrieved documents."""
@@ -259,16 +260,47 @@ workflow.add_conditional_edges(
 
 app = workflow.compile()
 
-def query_moa(question, max_iterations=3):
+def save_context(task_id, context):
+    query = """
+    INSERT OR REPLACE INTO context (task_id, context_json)
+    VALUES (:task_id, :context_json)
+    """
+    db.run(query, parameters={"task_id": task_id, "context_json": json.dumps(context)})
+    console.print(f"[green]Context saved for task ID: {task_id}[/green]")
+
+def get_context(task_id):
+    query = "SELECT context_json FROM context WHERE task_id = :task_id"
+    result = db.run(query, parameters={"task_id": task_id}, fetch="one")
+    if result:
+        context = json.loads(result[0])
+        console.print(f"[green]Context retrieved for task ID: {task_id}[/green]")
+        return context
+    else:
+        console.print(f"[yellow]No context found for task ID: {task_id}[/yellow]")
+        return None
+
+def query_moa(question, max_iterations=3, task_id=None, context=None):
+    console.print(f"[blue]Starting query_moa with task_id: {task_id}[/blue]")
+    
+    if task_id and not context:
+        context = get_context(task_id)
+    
+    if context:
+        console.print(f"[green]Using existing context for task ID: {task_id}[/green]")
+    else:
+        console.print("[yellow]No existing context found. Starting with empty context.[/yellow]")
+        context = {}
+
     initial_state = {
         "input": question,
-        "responses": '',
+        "responses": context.get('last_response', ''),
         'feedback': "",
         "aggregated_response": [],
         "final_answer": "",
         "iteration": 0,
         "max_iterations": max_iterations,
-        "reflection": ""
+        "reflection": "",
+        "context": context
     }
     
     current_state = initial_state
@@ -314,6 +346,9 @@ def query_moa(question, max_iterations=3):
                                     expand=False))
                 break
     
+    if task_id:
+        save_context(task_id, current_state['context'])
+    
     return current_state
 
 def safe_str(obj):
@@ -348,6 +383,17 @@ def perform_web_search(query: str) -> str:
         return f"Error performing web search: {str(e)}"
 
 def main():
+    # Drop the existing table if it exists
+    db.run("DROP TABLE IF EXISTS context")
+    
+    # Create the table with the correct schema
+    db.run("""
+    CREATE TABLE IF NOT EXISTS context (
+        task_id TEXT PRIMARY KEY,
+        context_json TEXT
+    )
+    """)
+
     console.print(Panel(
         welcome_message,
         title="MoGA: Mixture of Graph Agents w/Tools",
@@ -358,17 +404,36 @@ def main():
         padding=(1, 1)
     ))
     
-    console.print("\n[bold cyan]Enter your query below:[/bold cyan]")
+    console.print("\n[bold cyan]Enter your query or task below:[/bold cyan]")
     console.print("[italic]The agents will search the web if they need current information.[/italic]")
+    console.print("[italic]To continue a previous task, use the format: CONTINUE:task_id[/italic]")
     
+    current_task_id = None
+    current_context = None
+
     while True:
-        question = Prompt.ask("\n[bold magenta]Query >>[/bold magenta]")
+        user_input = Prompt.ask("\n[bold magenta]Query/Task >>[/bold magenta]")
         
-        if question.lower() in ["exit", "quit"]:
+        if user_input.lower() in ["exit", "quit"]:
             console.print(Panel("[yellow]Thank you for using the MoGA. Goodbye![/yellow]", 
                                 border_style="bold yellow", 
                                 expand=False))
             break
+        
+        if user_input.startswith("CONTINUE:"):
+            current_task_id = user_input.split(":")[1].strip()
+            current_context = get_context(current_task_id)
+            if current_context:
+                console.print(f"[green]Continuing task: {current_task_id}[/green]")
+                question = current_context.get('last_question', "")
+                console.print(f"[dim]Last question: {question}[/dim]")
+            else:
+                console.print(f"[yellow]No existing context found for task: {current_task_id}. Starting new task.[/yellow]")
+                question = Prompt.ask("[bold cyan]Enter your question/task[/bold cyan]")
+        else:
+            question = user_input
+            current_task_id = f"task_{int(time.time())}"  # Generate a new task ID
+            current_context = None
         
         max_iterations = int(Prompt.ask(
             "[bold cyan]Max iterations[/bold cyan]", default="3", show_default=True
@@ -376,7 +441,10 @@ def main():
         
         with console.status("[bold green]Processing your query...[/bold green]") as status:
             try:
-                result = query_moa(question, max_iterations=max_iterations)
+                result = query_moa(question, max_iterations=max_iterations, task_id=current_task_id, context=current_context)
+                current_context = result.get('context', {})
+                current_context['last_question'] = question
+                save_context(current_task_id, current_context)
             except Exception as e:
                 result = {"responses": f"Error occurred: {str(e)}"}
 
@@ -406,9 +474,8 @@ def main():
             console.print(f"[bold red]Error displaying result: {str(e)}[/bold red]")
             console.print(f"Raw response: {response}")
 
-        console.print("\n[italic cyan]Enter another question or type 'exit' to quit.[/italic cyan]")
-        
-        
+        console.print(f"\n[italic cyan]Current task ID: {current_task_id}[/italic cyan]")
+        console.print("[italic cyan]Enter another question, type 'CONTINUE:task_id' to continue a task, or type 'exit' to quit.[/italic cyan]")
 
 if __name__ == "__main__":
     main()
