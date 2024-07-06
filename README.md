@@ -37,3 +37,5 @@ Follow the prompts to enter your query and specify the maximum number of iterati
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE] file for details.
+
+ANY AND ALL CONTRIBUTIONS OR IMPROVEMENTS WELCOME 
