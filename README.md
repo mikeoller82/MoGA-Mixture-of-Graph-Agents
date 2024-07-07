@@ -12,7 +12,7 @@ MoGA is a powerful question-answering system that utilizes multiple language mod
 
 ## Installation
 
-1. Clone the repository: git clone https://github.com/mikeoller82/moga.git
+1. Clone the reoo
 cd moga
 2. Create a virtual environment:python -m venv venv
 source venv/bin/activate
