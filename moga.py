@@ -2,6 +2,8 @@ import json
 import operator
 import os
 import time
+from json.decoder import JSONDecodeError
+from self_discover import SelfDiscover, reasoning_modules_str
 from typing import Dict, TypedDict, Annotated
 from sqlalchemy import create_engine
 
@@ -13,7 +15,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.prompt import Prompt
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.markdown import Markdown
 
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -35,7 +36,8 @@ db = SQLDatabase(engine)
 
 welcome_message = Group(
     Text("Welcome to MoGA (Mixture-of-Graph-Agents)!", style="bold cyan"),
-    Text("\nThis script uses the following LLMs as proposer models, then passes the results to the aggregate model for the final response:"),
+    Text("\nThis script uses Langchain's Langgraph Library in conjunction with Groq's LLMs as proposer models, then passes the results to the aggregate model for the final response:"),
+    Text("\nThe proposer models use ", end=""),
     Text("- llama3-8b-8192", style="green"),
     Text("- gemma2-9b-it", style="green"),
     Text("- mixtral-8x7b-32768", style="green"),
@@ -63,7 +65,7 @@ class GlobalRateLimiter:
         if self.tokens_used > self.max_tokens_per_minute:
             sleep_time = 60 - (time.time() - self.last_reset_time)
             if sleep_time > 0:
-                console.print(Panel("[yellow]The models are collaborating...[/yellow]", 
+                console.print(Panel("[yellow]Graph Edges and Conditionals are being integrated into the Agents...[/yellow]", 
                                     border_style="bold magenta", 
                                     expand=False))
                 time.sleep(sleep_time)
@@ -120,8 +122,6 @@ class Proposer:
             response=state['responses'],
             feedback=state['feedback']
         )
-        time.sleep(2)
-        time.sleep(2)
     
         
         # Estimate token count (you may need to implement a more accurate method)
@@ -143,7 +143,6 @@ class Proposer:
         # Estimate tokens and add to global counter
         tokens_used = len(str(response.content)) // 4
         global_rate_limiter.add_tokens(tokens_used)
-        time.sleep(2)
         
         return {"aggregated_response": [json.dumps({self.id: response.content})]}
     
@@ -166,7 +165,6 @@ def aggregator(state: State) -> State:
         responses="\n\n".join(state["aggregated_response"])
     )
     
-    time.sleep(2)
     
     # Estimate token count
     estimated_tokens = len(str(messages)) // 4
@@ -204,8 +202,6 @@ def reflector(state: State) -> State:
         )
     ])
     chain = prompt | reflector_model | parser
-    
-    time.sleep(2)
 
     # Estimate token count
     estimated_tokens = len(state["input"]) // 4 + len(state["responses"]) // 4
@@ -261,26 +257,54 @@ workflow.add_conditional_edges(
 app = workflow.compile()
 
 def save_context(task_id, context):
-    query = """
-    INSERT OR REPLACE INTO context (task_id, context_json)
-    VALUES (:task_id, :context_json)
-    """
-    db.run(query, parameters={"task_id": task_id, "context_json": json.dumps(context)})
-    console.print(f"[green]Context saved for task ID: {task_id}[/green]")
+    try:
+        context_json = json.dumps(context)
+        query = """
+        INSERT OR REPLACE INTO context (task_id, context_json)
+        VALUES (:task_id, :context_json)
+        """
+        db.run(query, parameters={"task_id": task_id, "context_json": context_json})
+        console.print(f"[green]Context saved for task ID: {task_id}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error saving context for task ID: {task_id}. Error: {str(e)}[/red]")
 
 def get_context(task_id):
     query = "SELECT context_json FROM context WHERE task_id = :task_id"
     result = db.run(query, parameters={"task_id": task_id}, fetch="one")
     if result:
-        context = json.loads(result[0])
-        console.print(f"[green]Context retrieved for task ID: {task_id}[/green]")
-        return context
+        try:
+            context = json.loads(result[0])
+            console.print(f"[green]Context retrieved for task ID: {task_id}[/green]")
+            return context
+        except JSONDecodeError as e:
+            console.print(f"[yellow]Error decoding JSON for task ID: {task_id}. Error: {str(e)}[/yellow]")
+            console.print(f"[yellow]Raw data: {result[0]}[/yellow]")
+            # Attempt to clean and recover the data
+            try:
+                cleaned_data = result[0].strip()
+                if cleaned_data.startswith("'") and cleaned_data.endswith("'"):
+                    cleaned_data = cleaned_data[1:-1]  # Remove surrounding quotes if present
+                context = json.loads(cleaned_data)
+                console.print(f"[green]Successfully recovered context data[/green]")
+                return context
+            except JSONDecodeError:
+                console.print(f"[red]Unable to recover context data. Starting with empty context.[/red]")
+                return {}
     else:
         console.print(f"[yellow]No context found for task ID: {task_id}[/yellow]")
         return None
+    
+def dump_raw_context(task_id):
+    query = "SELECT context_json FROM context WHERE task_id = :task_id"
+    result = db.run(query, parameters={"task_id": task_id}, fetch="one")
+    if result:
+        console.print(f"[bold]Raw context for task ID {task_id}:[/bold]")
+        console.print(result[0])
+    else:
+        console.print(f"[yellow]No data found for task ID: {task_id}[/yellow]")
 
-def query_moa(question, max_iterations=3, task_id=None, context=None):
-    console.print(f"[blue]Starting query_moa with task_id: {task_id}[/blue]")
+def query_moa(question, max_iterations=3, task_id=None, context=None, use_self_discover=False):
+    console.print(f"[blue]Starting query with task_id: {task_id}[/blue]")
     
     if task_id and not context:
         context = get_context(task_id)
@@ -288,7 +312,7 @@ def query_moa(question, max_iterations=3, task_id=None, context=None):
     if context:
         console.print(f"[green]Using existing context for task ID: {task_id}[/green]")
     else:
-        console.print("[yellow]No existing context found. Starting with empty context.[/yellow]")
+        console.print("[yellow]No existing context found.[/yellow]")
         context = {}
 
     initial_state = {
@@ -304,6 +328,15 @@ def query_moa(question, max_iterations=3, task_id=None, context=None):
     }
     
     current_state = initial_state
+
+    if use_self_discover:
+        self_discover = SelfDiscover(aggregator_model)
+        self_discover_result = self_discover.process(question, reasoning_modules_str)
+        initial_state["responses"] = self_discover_result
+        console.print(Panel("[bold cyan]Self-Discover processing completed[/bold cyan]", 
+                            border_style="cyan", 
+                            expand=False))
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -313,18 +346,22 @@ def query_moa(question, max_iterations=3, task_id=None, context=None):
         for output in app.stream(initial_state):
             for key, value in output.items():
                 if key.startswith("proposer"):
+                    time.sleep(1)
                     console.print(Panel(f"[bold green]{key.capitalize()} completed[/bold green]", 
                                         border_style="green", 
                                         expand=False))
                 elif key == "aggregator":
+                    time.sleep(1)
                     console.print(Panel(f"[bold orange1]Aggregator completed[/bold orange1]", 
                                         border_style="orange1", 
                                         expand=False))
                 elif key == "reflector":
+                    time.sleep(1)
                     console.print(Panel(f"[bold red]Reflector completed[/bold red]", 
                                         border_style="red", 
                                         expand=False))
                 else:
+                    time.sleep(1)
                     console.print(Panel(f"[bold blue]{key.capitalize()} completed[/bold blue]", 
                                         border_style="blue", 
                                         expand=False))
@@ -337,7 +374,6 @@ def query_moa(question, max_iterations=3, task_id=None, context=None):
             global_rate_limiter.add_tokens(iteration_tokens)
             
             progress.update(task, advance=1)
-            time.sleep(2)
             
             # Check if we've reached the maximum iterations
             if current_state['iteration'] >= max_iterations:
@@ -396,7 +432,7 @@ def main():
 
     console.print(Panel(
         welcome_message,
-        title="MoGA: Mixture of Graph Agents w/Tools",
+        title="MoGA: Mixture of Graph Agents",
         title_align="center",
         border_style="bold blue",
         box=box.DOUBLE,
@@ -438,10 +474,14 @@ def main():
         max_iterations = int(Prompt.ask(
             "[bold cyan]Max iterations[/bold cyan]", default="3", show_default=True
         ))
+
+        use_self_discover = Prompt.ask(
+            "[bold cyan]Use Self-Discover? (y/n)[/bold cyan]", default="n", show_default=True
+        ).lower() == 'y'
         
         with console.status("[bold green]Processing your query...[/bold green]") as status:
             try:
-                result = query_moa(question, max_iterations=max_iterations, task_id=current_task_id, context=current_context)
+                result = query_moa(question, max_iterations=max_iterations, task_id=current_task_id, context=current_context, use_self_discover=use_self_discover)
                 current_context = result.get('context', {})
                 current_context['last_question'] = question
                 save_context(current_task_id, current_context)
@@ -479,7 +519,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
 
     
  
