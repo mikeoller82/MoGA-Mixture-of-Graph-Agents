@@ -4,7 +4,7 @@ MoGA is a powerful question-answering system that utilizes multiple language mod
 
 ## Features
 
-- Uses multiple LLMs as proposer models (llama3-8b-8192, gemma-7b-it, mixtral-8x7b-32768)Groq Models
+- Uses multiple LLMs as proposer models (llama3-8b-8192, gemma2-9b-it, mixtral-8x7b-32768)Groq Models
 - Aggregates responses using llama3-70b-8192
 - Performs web searches for current information
 - Iterative refinement process with reflection
