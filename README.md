@@ -1,6 +1,6 @@
 # MoGA (Mixture-of-Graph-Agents)
 
-MoGA is a powerful question-answering system that utilizes multiple language models and a graph-based approach to generate high-quality responses. It combines the strengths of various models, performs web searches for up-to-date information, and uses an iterative refinement process to produce comprehensive answers. The replies do take a few minutes but there is alot going on under the hood and the content is next level compares to gpt4o content easily and its free :)
+MoGA is a powerful question-answering system that utilizes multiple language models from Groq and a graph-based approach from Langchain's Langgraph to generate high-quality responses. It combines the strengths of Groqs models, performs web searches for up-to-date information, and uses an iterative refinement process to produce comprehensive answers. The replies do take a few minutes but there is alot going on under the hood and the content is next level compares to gpt4o content easily and its free :)
 
 ## Features
 
